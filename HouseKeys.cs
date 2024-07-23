@@ -4,6 +4,7 @@
  * Full legal terms can be found at https://game4freak.io/eula/
  */
 
+using Facepunch;
 using Newtonsoft.Json;
 using Rust;
 using System;
@@ -15,7 +16,7 @@ using static BuildingManager;
 
 namespace Oxide.Plugins
 {
-    [Info("House Keys", "VisEntities", "1.0.0")]
+    [Info("House Keys", "VisEntities", "1.1.0")]
     [Description("Enables remote control of doors, locks, and turrets in any building.")]
     public class HouseKeys : RustPlugin
     {
@@ -37,6 +38,12 @@ namespace Oxide.Plugins
             [JsonProperty("Building Detection Range")]
             public float BuildingDetectionRange { get; set; }
 
+            [JsonProperty("Building Has To Have Tool Cupboard")]
+            public bool BuildingHasToHaveToolCupboard { get; set; }
+
+            [JsonProperty("Player Has To Have Building Privilege")]
+            public bool PlayerHasToHaveBuildingPrivilege { get; set; }
+            
             [JsonProperty("Enable Visualization")]
             public bool EnableVisualization { get; set; }
 
@@ -74,6 +81,12 @@ namespace Oxide.Plugins
             if (string.Compare(_config.Version, "1.0.0") < 0)
                 _config = defaultConfig;
 
+            if (string.Compare(_config.Version, "1.1.0") < 0)
+            {
+                _config.BuildingHasToHaveToolCupboard = defaultConfig.BuildingHasToHaveToolCupboard;
+                _config.PlayerHasToHaveBuildingPrivilege = defaultConfig.PlayerHasToHaveBuildingPrivilege;
+            }
+
             PrintWarning("Config update complete! Updated from version " + _config.Version + " to " + Version.ToString());
             _config.Version = Version.ToString();
         }
@@ -84,6 +97,8 @@ namespace Oxide.Plugins
             {
                 Version = Version.ToString(),
                 BuildingDetectionRange = 25,
+                BuildingHasToHaveToolCupboard = true,
+                PlayerHasToHaveBuildingPrivilege = true,
                 EnableVisualization = true,
                 VisualizationDurationSeconds = 10f
             };
@@ -155,10 +170,22 @@ namespace Oxide.Plugins
 
         private static class PermissionUtil
         {
-            public const string USE = "housekeys.use";
+            public const string ALL = "housekeys.all";
+            public const string TURRET = "housekeys.turret";
+            public const string CUPBOARD = "housekeys.cupboard";
+            public const string DOOR = "housekeys.door";
+            public const string LOCK = "housekeys.lock";
+            public const string TRAP = "housekeys.trap";
+            public const string BYPASS = "housekeys.bypass";
             private static readonly List<string> _permissions = new List<string>
             {
-                USE,
+                ALL,
+                TURRET,
+                CUPBOARD,
+                DOOR,
+                LOCK,
+                TRAP,
+                BYPASS,
             };
 
             public static void RegisterPermissions()
@@ -241,6 +268,58 @@ namespace Oxide.Plugins
 
         #endregion Helper Classes
 
+        #region Helper Functions
+
+        public static bool AreTeammates(ulong firstPlayerId, ulong secondPlayerId)
+        {
+            RelationshipManager.PlayerTeam team = RelationshipManager.ServerInstance.FindPlayersTeam(firstPlayerId);
+            if (team != null && team.members.Contains(secondPlayerId))
+                return true;
+
+            return false;
+        }
+        
+        private bool PlayerHasBuildingPrivilege(BasePlayer player, Building building)
+        {
+            foreach (var privilege in building.buildingPrivileges)
+            {
+                if (privilege.IsAuthed(player))
+                    return true;
+            }
+
+            return false;
+        }
+
+        #endregion Helper Functions
+
+        #region Visualization
+        
+        private void VisualizeEntity(BasePlayer player, Vector3 entityPosition, string text)
+        {
+            bool wasAdmin = player.IsAdmin;
+            try
+            {
+                if (!wasAdmin)
+                {
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, true);
+                    player.SendNetworkUpdateImmediate();
+                }
+
+                DrawUtil.Text(player, _config.VisualizationDurationSeconds, Color.white, entityPosition, $"<size=30>{text}</size>");
+                DrawUtil.Box(player, _config.VisualizationDurationSeconds, Color.black, entityPosition, 0.5f);
+            }
+            finally
+            {
+                if (!wasAdmin)
+                {
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, false);
+                    player.SendNetworkUpdateImmediate();
+                }
+            }
+        }
+
+        #endregion Visualization
+
         #region House Management
 
         #region Doors
@@ -257,8 +336,13 @@ namespace Oxide.Plugins
 
                     if (_config.EnableVisualization)
                     {
-                        DrawUtil.Box(player, _config.VisualizationDurationSeconds, Color.black, door.WorldSpaceBounds().position, 0.5f);
-                        DrawUtil.Text(player, _config.VisualizationDurationSeconds, Color.white, door.WorldSpaceBounds().position, door.ShortPrefabName);
+                        string action = "Closed";
+                        if (open)
+                        {
+                            action = "Opened";
+                        }
+
+                        VisualizeEntity(player, door.WorldSpaceBounds().position, $"{door.ShortPrefabName}\n{action}");
                     }
                 }
 
@@ -288,8 +372,13 @@ namespace Oxide.Plugins
 
                         if (_config.EnableVisualization)
                         {
-                            DrawUtil.Box(player, _config.VisualizationDurationSeconds, Color.black, baseLock.WorldSpaceBounds().position, 0.5f);
-                            DrawUtil.Text(player, _config.VisualizationDurationSeconds, Color.white, baseLock.WorldSpaceBounds().position, baseLock.ShortPrefabName);
+                            string action = "Unlocked";
+                            if (locked)
+                            {
+                                action = "Locked";
+                            }
+
+                            VisualizeEntity(player, baseLock.WorldSpaceBounds().position, $"{baseLock.ShortPrefabName}\n{action}");
                         }
                     }
                 }
@@ -317,8 +406,7 @@ namespace Oxide.Plugins
 
                         if (_config.EnableVisualization)
                         {
-                            DrawUtil.Box(player, _config.VisualizationDurationSeconds, Color.black, codeLock.WorldSpaceBounds().position, 0.5f);
-                            DrawUtil.Text(player, _config.VisualizationDurationSeconds, Color.white, codeLock.WorldSpaceBounds().position, codeLock.ShortPrefabName);
+                            VisualizeEntity(player, codeLock.WorldSpaceBounds().position, $"{codeLock.ShortPrefabName}\nAuthorization Cleared");
                         }
                     }
                 }
@@ -346,8 +434,7 @@ namespace Oxide.Plugins
 
                         if (_config.EnableVisualization)
                         {
-                            DrawUtil.Box(player, _config.VisualizationDurationSeconds, Color.black, codeLock.WorldSpaceBounds().position, 0.5f);
-                            DrawUtil.Text(player, _config.VisualizationDurationSeconds, Color.white, codeLock.WorldSpaceBounds().position, codeLock.ShortPrefabName);
+                            VisualizeEntity(player, codeLock.WorldSpaceBounds().position, $"{codeLock.ShortPrefabName}\nCode Changed {newCode}");
                         }
                     }
                 }
@@ -370,19 +457,28 @@ namespace Oxide.Plugins
             {
                 if (decayEntity is AutoTurret autoTurret)
                 {
-                    if (turnOn)
+                    if (turnOn && autoTurret.IsPowered())
+                    {
                         autoTurret.InitiateStartup();
-                    else
+                        count++;
+                    }
+                    else if (!turnOn && autoTurret.IsOnline())
+                    {
                         autoTurret.InitiateShutdown();
-                    count++;
+                        count++;
+                    }
 
                     if (_config.EnableVisualization)
                     {
-                        DrawUtil.Box(player, _config.VisualizationDurationSeconds, Color.black, autoTurret.WorldSpaceBounds().position, 0.5f);
-                        DrawUtil.Text(player, _config.VisualizationDurationSeconds, Color.white, autoTurret.WorldSpaceBounds().position, autoTurret.ShortPrefabName);
+                        string action = "Turned Off";
+                        if (turnOn)
+                        {
+                            action = "Turned On";
+                        }
+
+                        VisualizeEntity(player, autoTurret.WorldSpaceBounds().position, $"{autoTurret.ShortPrefabName}\n{action}");
                     }
                 }
-
                 yield return null;
             }
 
@@ -396,15 +492,17 @@ namespace Oxide.Plugins
             foreach (var decayEntity in building.decayEntities)
             {
                 if (decayEntity is AutoTurret autoTurret)
-                {
-                    if (UnloadTrapFromAmmo(decayEntity as StorageContainer))
+                {             
+                    if (UnloadTrapFromAmmo(autoTurret.inventory, dropAmmo: true))
                     {
                         count++;
                         if (_config.EnableVisualization)
                         {
-                            DrawUtil.Box(player, _config.VisualizationDurationSeconds, Color.black, autoTurret.WorldSpaceBounds().position, 0.5f);
-                            DrawUtil.Text(player, _config.VisualizationDurationSeconds, Color.white, autoTurret.WorldSpaceBounds().position, autoTurret.ShortPrefabName);
+                            VisualizeEntity(player, autoTurret.WorldSpaceBounds().position, $"{autoTurret.ShortPrefabName}\nUnloaded");
                         }
+
+                        if (autoTurret.IsOnline())
+                            autoTurret.InitiateShutdown();
                     }
                 }
 
@@ -422,13 +520,16 @@ namespace Oxide.Plugins
             {
                 if (decayEntity is GunTrap || decayEntity is FlameTurret)
                 {
-                    if (UnloadTrapFromAmmo(decayEntity as StorageContainer))
+                    StorageContainer storageContainer = decayEntity as StorageContainer;
+                    if (storageContainer != null)
                     {
-                        count++;
-                        if (_config.EnableVisualization)
+                        if (UnloadTrapFromAmmo(storageContainer.inventory, dropAmmo: true))
                         {
-                            DrawUtil.Box(player, _config.VisualizationDurationSeconds, Color.black, decayEntity.WorldSpaceBounds().position, 0.5f);
-                            DrawUtil.Text(player, _config.VisualizationDurationSeconds, Color.white, decayEntity.WorldSpaceBounds().position, decayEntity.ShortPrefabName);
+                            count++;
+                            if (_config.EnableVisualization)
+                            {
+                                VisualizeEntity(player, decayEntity.WorldSpaceBounds().position, $"{decayEntity.ShortPrefabName}\nUnloaded");
+                            }
                         }
                     }
                 }
@@ -452,8 +553,7 @@ namespace Oxide.Plugins
 
                     if (_config.EnableVisualization)
                     {
-                        DrawUtil.Box(player, _config.VisualizationDurationSeconds, Color.black, autoTurret.WorldSpaceBounds().position, 0.5f);
-                        DrawUtil.Text(player, _config.VisualizationDurationSeconds, Color.white, autoTurret.WorldSpaceBounds().position, autoTurret.ShortPrefabName);
+                        VisualizeEntity(player, autoTurret.WorldSpaceBounds().position, $"{autoTurret.ShortPrefabName}\nAuthorization Cleared");
                     }
                 }
 
@@ -464,20 +564,60 @@ namespace Oxide.Plugins
                 onComplete.Invoke(count);
         }
 
-        private bool UnloadTrapFromAmmo(StorageContainer ammoContainer)
+        private IEnumerator SetAutoTurretMode(BasePlayer player, Building building, bool peacekeeper, Action<int> onComplete)
         {
-            if (ammoContainer == null || ammoContainer.inventory == null)
+            int count = 0;
+            foreach (var decayEntity in building.decayEntities)
+            {
+                if (decayEntity is AutoTurret autoTurret)
+                {
+                    autoTurret.SetPeacekeepermode(peacekeeper);
+                    count++;
+
+                    if (_config.EnableVisualization)
+                    {
+                        string mode = "Hostile";
+                        if (peacekeeper)
+                        {
+                            mode = "Peacekeeper";
+                        }
+
+                        VisualizeEntity(player, autoTurret.WorldSpaceBounds().position, $"{autoTurret.ShortPrefabName}\n{mode}");
+                    }
+                }
+
+                yield return null;
+            }
+
+            if (onComplete != null)
+                onComplete.Invoke(count);
+        }
+
+        private bool UnloadTrapFromAmmo(ItemContainer ammoContainer, bool dropAmmo)
+        {
+            if (ammoContainer == null)
                 return false;
 
             bool unloaded = false;
-            foreach (Item item in ammoContainer.inventory.itemList)
+            List<Item> itemsToUnload = Pool.GetList<Item>();
+
+            foreach (Item item in ammoContainer.itemList)
             {
                 if (item != null && item.amount > 0)
-                {
-                    item.Remove();
-                    unloaded = true;
-                }
+                    itemsToUnload.Add(item);
             }
+
+            foreach (Item item in itemsToUnload)
+            {
+                if (dropAmmo)
+                    item.Drop(ammoContainer.dropPosition, ammoContainer.dropVelocity, default(Quaternion));
+                else
+                    item.Remove();
+
+                unloaded = true;
+            }
+
+            Pool.FreeList(ref itemsToUnload);
             return unloaded;
         }
 
@@ -497,8 +637,7 @@ namespace Oxide.Plugins
 
                     if (_config.EnableVisualization)
                     {
-                        DrawUtil.Box(player, _config.VisualizationDurationSeconds, Color.black, cupboard.WorldSpaceBounds().position, 0.5f);
-                        DrawUtil.Text(player, _config.VisualizationDurationSeconds, Color.white, cupboard.WorldSpaceBounds().position, cupboard.ShortPrefabName);
+                        VisualizeEntity(player, cupboard.WorldSpaceBounds().position, $"{cupboard.ShortPrefabName}\nAuthorization Cleared");
                     }
                 }
 
@@ -536,6 +675,8 @@ namespace Oxide.Plugins
             /// house.turret off
             /// house.turret unload
             /// house.turret auth clear
+            /// house.turret peacekeeper
+            /// house.turret hostile
             /// </summary>
             public const string TURRET = "house.turret";
 
@@ -556,7 +697,7 @@ namespace Oxide.Plugins
             if (player == null)
                 return;
 
-            if (!PermissionUtil.HasPermission(player, PermissionUtil.USE))
+            if (!PermissionUtil.HasPermission(player, PermissionUtil.DOOR) && !PermissionUtil.HasPermission(player, PermissionUtil.ALL))
             {
                 SendMessage(player, Lang.NoPermission);
                 return;
@@ -579,10 +720,22 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, mustHaveBuildingPrivilege: false);
+            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
+                return;
+            }
+
+            if (_config.PlayerHasToHaveBuildingPrivilege && !PlayerHasBuildingPrivilege(player, building))
+            {
+                SendMessage(player, Lang.NoAuthorization);
+                return;
+            }
+
+            if (_config.PlayerHasToHaveBuildingPrivilege && !PlayerHasBuildingPrivilege(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
+            {
+                SendMessage(player, Lang.NoAuthorization);
                 return;
             }
 
@@ -611,7 +764,7 @@ namespace Oxide.Plugins
             if (player == null)
                 return;
 
-            if (!PermissionUtil.HasPermission(player, PermissionUtil.USE))
+            if (!PermissionUtil.HasPermission(player, PermissionUtil.LOCK) && !PermissionUtil.HasPermission(player, PermissionUtil.ALL))
             {
                 SendMessage(player, Lang.NoPermission);
                 return;
@@ -634,10 +787,16 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, mustHaveBuildingPrivilege: false);
+            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
+                return;
+            }
+
+            if (_config.PlayerHasToHaveBuildingPrivilege && !PlayerHasBuildingPrivilege(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
+            {
+                SendMessage(player, Lang.NoAuthorization);
                 return;
             }
 
@@ -714,19 +873,21 @@ namespace Oxide.Plugins
             if (player == null)
                 return;
 
-            if (!PermissionUtil.HasPermission(player, PermissionUtil.USE))
+            if (!PermissionUtil.HasPermission(player, PermissionUtil.TURRET) && !PermissionUtil.HasPermission(player, PermissionUtil.ALL))
             {
                 SendMessage(player, Lang.NoPermission);
                 return;
             }
 
-            if (args.Length < 1 || (args[0] != "on" && args[0] != "off" && args[0] != "unload" && args[0] != "auth"))
+            if (args.Length < 1 || (args[0] != "on" && args[0] != "off" && args[0] != "unload" && args[0] != "auth" && args[0] != "peacekeeper" && args[0] != "hostile"))
             {
                 SendMessage(player, Lang.InvalidArgs,
                     $"  -<color=#F0E68C> {Cmd.TURRET} on</color>\n" +
                     $"  -<color=#F0E68C> {Cmd.TURRET} off</color>\n" +
                     $"  -<color=#F0E68C> {Cmd.TURRET} unload</color>\n" +
-                    $"  -<color=#F0E68C> {Cmd.TURRET} auth clear</color>");
+                    $"  -<color=#F0E68C> {Cmd.TURRET} auth clear</color>\n" +
+                    $"  -<color=#F0E68C> {Cmd.TURRET} peacekeeper</color>\n" +
+                    $"  -<color=#F0E68C> {Cmd.TURRET} hostile</color>");
                 return;
             }
 
@@ -737,10 +898,16 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, mustHaveBuildingPrivilege: false);
+            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
+                return;
+            }
+
+            if (_config.PlayerHasToHaveBuildingPrivilege && !PlayerHasBuildingPrivilege(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
+            {
+                SendMessage(player, Lang.NoAuthorization);
                 return;
             }
 
@@ -793,13 +960,29 @@ namespace Oxide.Plugins
                     }
                 }));
             }
+            else if (args[0] == "peacekeeper")
+            {
+                CoroutineUtil.StartCoroutine("SetAutoTurretMode", SetAutoTurretMode(player, building, true, count =>
+                {
+                    SendMessage(player, Lang.TurretsPeacekeeper, count);
+                }));
+            }
+            else if (args[0] == "hostile")
+            {
+                CoroutineUtil.StartCoroutine("SetAutoTurretMode", SetAutoTurretMode(player, building, false, count =>
+                {
+                    SendMessage(player, Lang.TurretsHostile, count);
+                }));
+            }
             else
             {
                 SendMessage(player, Lang.InvalidArgs,
                     $"  -<color=#F0E68C> {Cmd.TURRET} on</color>\n" +
                     $"  -<color=#F0E68C> {Cmd.TURRET} off</color>\n" +
                     $"  -<color=#F0E68C> {Cmd.TURRET} unload</color>\n" +
-                    $"  -<color=#F0E68C> {Cmd.TURRET} auth clear</color>");
+                    $"  -<color=#F0E68C> {Cmd.TURRET} auth clear</color>\n" +
+                    $"  -<color=#F0E68C> {Cmd.TURRET} peacekeeper</color>\n" +
+                    $"  -<color=#F0E68C> {Cmd.TURRET} hostile</color>");
             }
         }
 
@@ -809,13 +992,13 @@ namespace Oxide.Plugins
             if (player == null)
                 return;
 
-            if (!PermissionUtil.HasPermission(player, PermissionUtil.USE))
+            if (!PermissionUtil.HasPermission(player, PermissionUtil.CUPBOARD) && !PermissionUtil.HasPermission(player, PermissionUtil.ALL))
             {
                 SendMessage(player, Lang.NoPermission);
                 return;
             }
 
-            if (args.Length != 1 || args[0] != "auth" || args[0] != "clear")
+            if (args.Length != 2 || args[0] != "auth" || args[1] != "clear")
             {
                 SendMessage(player, Lang.InvalidArgs,
                     $"  -<color=#F0E68C> {Cmd.CUPBOARD} auth clear</color>");
@@ -829,10 +1012,16 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, mustHaveBuildingPrivilege: false);
+            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
+                return;
+            }
+
+            if (_config.PlayerHasToHaveBuildingPrivilege && !PlayerHasBuildingPrivilege(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
+            {
+                SendMessage(player, Lang.NoAuthorization);
                 return;
             }
 
@@ -855,7 +1044,7 @@ namespace Oxide.Plugins
             if (player == null)
                 return;
 
-            if (!PermissionUtil.HasPermission(player, PermissionUtil.USE))
+            if (!PermissionUtil.HasPermission(player, PermissionUtil.TRAP) && !PermissionUtil.HasPermission(player, PermissionUtil.ALL))
             {
                 SendMessage(player, Lang.NoPermission);
                 return;
@@ -875,10 +1064,16 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, mustHaveBuildingPrivilege: false);
+            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
+                return;
+            }
+
+            if (_config.PlayerHasToHaveBuildingPrivilege && !PlayerHasBuildingPrivilege(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
+            {
+                SendMessage(player, Lang.NoAuthorization);
                 return;
             }
 
@@ -904,6 +1099,7 @@ namespace Oxide.Plugins
             public const string NoPermission = "NoPermission";
             public const string InvalidArgs = "InvalidArgs";
             public const string NoBuildingFound = "NoBuildingFound";
+            public const string NoAuthorization = "NoAuthorization";
             public const string DoorsOpened = "DoorsOpened";
             public const string DoorsClosed = "DoorsClosed";
             public const string NoDoorsToOpen = "NoDoorsToOpen";
@@ -928,6 +1124,8 @@ namespace Oxide.Plugins
             public const string NoCupboardAuthToClear = "NoCupboardAuthToClear";
             public const string TrapsUnloaded = "TrapsUnloaded";
             public const string NoTrapsToUnload = "NoTrapsToUnload";
+            public const string TurretsHostile = "TurretsHostile";
+            public const string TurretsPeacekeeper = "TurretsPeacekeeper";
         }
 
         protected override void LoadDefaultMessages()
@@ -936,7 +1134,8 @@ namespace Oxide.Plugins
             {
                 [Lang.NoPermission] = "You do not have permission to use this command.",
                 [Lang.InvalidArgs] = "Invalid arguments. Usage:\n{0}",
-                [Lang.NoBuildingFound] = "No building found in sight.",
+                [Lang.NoBuildingFound] = "No building found in sight or the building does not have a tool cupboard.",
+                [Lang.NoAuthorization] = "Building privilege is required to perform this action.",
                 [Lang.DoorsOpened] = "<color=#ADFF2F>{0}</color> doors have been opened.",
                 [Lang.DoorsClosed] = "<color=#ADFF2F>{0}</color> doors have been closed.",
                 [Lang.NoDoorsToOpen] = "No doors to open.",
@@ -961,6 +1160,8 @@ namespace Oxide.Plugins
                 [Lang.NoCupboardAuthToClear] = "No cupboard authorizations to clear.",
                 [Lang.TrapsUnloaded] = "<color=#ADFF2F>{0}</color> traps have been unloaded.",
                 [Lang.NoTrapsToUnload] = "No traps to unload.",
+                [Lang.TurretsHostile] = "<color=#ADFF2F>{0}</color> auto turrets are now in hostile mode.",
+                [Lang.TurretsPeacekeeper] = "<color=#ADFF2F>{0}</color> auto turrets are now in peacekeeper mode."
             }, this, "en");
         }
 
