@@ -16,7 +16,7 @@ using static BuildingManager;
 
 namespace Oxide.Plugins
 {
-    [Info("House Keys", "VisEntities", "1.1.0")]
+    [Info("House Keys", "VisEntities", "1.2.0")]
     [Description("Enables remote control of doors, locks, and turrets in any building.")]
     public class HouseKeys : RustPlugin
     {
@@ -24,7 +24,7 @@ namespace Oxide.Plugins
 
         private static HouseKeys _plugin;
         private static Configuration _config;
-        private const int LAYER_BUILDING = Layers.Mask.Construction;
+        private const int LAYER_BUILDING = Layers.Mask.Deployed | Layers.Mask.Construction;
 
         #endregion Fields
 
@@ -43,7 +43,13 @@ namespace Oxide.Plugins
 
             [JsonProperty("Player Has To Have Building Privilege")]
             public bool PlayerHasToHaveBuildingPrivilege { get; set; }
-            
+
+            [JsonProperty("Player Has To Be Owner Of House Entities")]
+            public bool PlayerHasToBeOwnerOfHouseEntities { get; set; }
+
+            [JsonProperty("Can Teammates Also Control House Entities")]
+            public bool CanTeammatesAlsoControlHouseEntities { get; set; }
+
             [JsonProperty("Enable Visualization")]
             public bool EnableVisualization { get; set; }
 
@@ -87,6 +93,12 @@ namespace Oxide.Plugins
                 _config.PlayerHasToHaveBuildingPrivilege = defaultConfig.PlayerHasToHaveBuildingPrivilege;
             }
 
+            if (string.Compare(_config.Version, "1.2.0") < 0)
+            {
+                _config.PlayerHasToBeOwnerOfHouseEntities = defaultConfig.PlayerHasToBeOwnerOfHouseEntities;
+                _config.CanTeammatesAlsoControlHouseEntities = defaultConfig.CanTeammatesAlsoControlHouseEntities;
+            }
+
             PrintWarning("Config update complete! Updated from version " + _config.Version + " to " + Version.ToString());
             _config.Version = Version.ToString();
         }
@@ -99,6 +111,8 @@ namespace Oxide.Plugins
                 BuildingDetectionRange = 25,
                 BuildingHasToHaveToolCupboard = true,
                 PlayerHasToHaveBuildingPrivilege = true,
+                PlayerHasToBeOwnerOfHouseEntities = true,
+                CanTeammatesAlsoControlHouseEntities = true,
                 EnableVisualization = true,
                 VisualizationDurationSeconds = 10f
             };
@@ -125,17 +139,22 @@ namespace Oxide.Plugins
 
         #region Building Retrieval
 
-        private BuildingBlock FindBuildingBlockInSight(BasePlayer player, float distance)
+        private BaseEntity GetEntityInSight(BasePlayer player, float distance)
         {
             RaycastHit raycastHit;
-            if (!Physics.Raycast(player.eyes.HeadRay(), out raycastHit, distance, LAYER_BUILDING, QueryTriggerInteraction.Ignore))
-                return null;
+            if (Physics.Raycast(player.eyes.HeadRay(), out raycastHit, distance, LAYER_BUILDING, QueryTriggerInteraction.Ignore))
+            {
+                BaseEntity entity = raycastHit.GetEntity();
+                if (entity != null)
+                {
+                    if (_config.EnableVisualization)
+                        VisualizeDetectedEntityInSight(player, player.eyes.position, raycastHit.point, entity.ShortPrefabName);
 
-            BuildingBlock buildingBlock = raycastHit.GetEntity() as BuildingBlock;
-            if (buildingBlock == null)
-                return null;
+                    return entity;
+                }
+            }
 
-            return buildingBlock;
+            return null;
         }
 
         private Building TryGetBuildingForEntity(BaseEntity entity, int minimumBuildingBlocks, bool mustHaveBuildingPrivilege = true)
@@ -270,6 +289,17 @@ namespace Oxide.Plugins
 
         #region Helper Functions
 
+        public static bool OwnerOrTeammate(BasePlayer player, BaseEntity entity)
+        {
+            if (entity.OwnerID == player.userID)
+                return true;
+
+            if (_config.CanTeammatesAlsoControlHouseEntities && AreTeammates(entity.OwnerID, player.userID))
+                return true;
+
+            return false;
+        }
+
         public static bool AreTeammates(ulong firstPlayerId, ulong secondPlayerId)
         {
             RelationshipManager.PlayerTeam team = RelationshipManager.ServerInstance.FindPlayersTeam(firstPlayerId);
@@ -278,8 +308,8 @@ namespace Oxide.Plugins
 
             return false;
         }
-        
-        private bool PlayerHasBuildingPrivilege(BasePlayer player, Building building)
+
+        public static bool PlayerHasBuildingPrivilege(BasePlayer player, Building building)
         {
             foreach (var privilege in building.buildingPrivileges)
             {
@@ -293,8 +323,33 @@ namespace Oxide.Plugins
         #endregion Helper Functions
 
         #region Visualization
-        
-        private void VisualizeEntity(BasePlayer player, Vector3 entityPosition, string text)
+
+        private void VisualizeDetectedEntityInSight(BasePlayer player, Vector3 startPosition, Vector3 hitPosition, string text)
+        {
+            bool wasAdmin = player.IsAdmin;
+            try
+            {
+                if (!wasAdmin)
+                {
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, true);
+                    player.SendNetworkUpdateImmediate();
+                }
+
+                DrawUtil.Arrow(player, _config.VisualizationDurationSeconds, Color.black, startPosition, hitPosition, 0.5f);
+                DrawUtil.Text(player, _config.VisualizationDurationSeconds, Color.white, hitPosition, $"<size=30>{text}</size>");
+                DrawUtil.Sphere(player, _config.VisualizationDurationSeconds, Color.green, hitPosition, 0.3f);
+            }
+            finally
+            {
+                if (!wasAdmin)
+                {
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, false);
+                    player.SendNetworkUpdateImmediate();
+                }
+            }
+        }
+
+        private void VisualizeHouseEntity(BasePlayer player, Vector3 entityPosition, string text)
         {
             bool wasAdmin = player.IsAdmin;
             try
@@ -320,19 +375,27 @@ namespace Oxide.Plugins
 
         #endregion Visualization
 
-        #region House Management
+        #region House Entities Management
 
         #region Doors
 
-        private IEnumerator OpenOrCloseDoors(BasePlayer player, Building building, bool open, Action<int> onComplete)
+        private IEnumerator OpenOrCloseDoorsCoroutine(BasePlayer player, Building building, bool open, Action<int, int> onComplete)
         {
-            int count = 0;
+            int successCount = 0;
+            int failCount = 0;
+
             foreach (var decayEntity in building.decayEntities)
             {
                 if (decayEntity is Door door)
                 {
+                    if (_config.PlayerHasToBeOwnerOfHouseEntities && !OwnerOrTeammate(player, door))
+                    {
+                        failCount++;
+                        continue;
+                    }
+
                     door.SetOpen(open);
-                    count++;
+                    successCount++;
 
                     if (_config.EnableVisualization)
                     {
@@ -342,7 +405,7 @@ namespace Oxide.Plugins
                             action = "Opened";
                         }
 
-                        VisualizeEntity(player, door.WorldSpaceBounds().position, $"{door.ShortPrefabName}\n{action}");
+                        VisualizeHouseEntity(player, door.WorldSpaceBounds().position, $"{door.ShortPrefabName}\n{action}");
                     }
                 }
 
@@ -350,16 +413,20 @@ namespace Oxide.Plugins
             }
 
             if (onComplete != null)
-                onComplete.Invoke(count);
+            {
+                onComplete.Invoke(successCount, failCount);
+            }
         }
 
         #endregion Doors
 
         #region Locks
 
-        private IEnumerator LockOrUnlockCodeLocks(BasePlayer player, Building building, bool locked, Action<int> onComplete)
+        private IEnumerator LockOrUnlockLocksCoroutine(BasePlayer player, Building building, bool locked, Action<int, int> onComplete)
         {
-            int count = 0;
+            int successCount = 0;
+            int failCount = 0;
+
             foreach (var decayEntity in building.decayEntities)
             {
                 if (decayEntity is BaseEntity baseEntity)
@@ -367,8 +434,14 @@ namespace Oxide.Plugins
                     BaseLock baseLock = baseEntity.GetSlot(BaseEntity.Slot.Lock) as BaseLock;
                     if (baseLock != null)
                     {
+                        if (_config.PlayerHasToBeOwnerOfHouseEntities && !OwnerOrTeammate(player, baseLock))
+                        {
+                            failCount++;
+                            continue;
+                        }
+
                         baseLock.SetFlag(BaseEntity.Flags.Locked, locked);
-                        count++;
+                        successCount++;
 
                         if (_config.EnableVisualization)
                         {
@@ -378,7 +451,7 @@ namespace Oxide.Plugins
                                 action = "Locked";
                             }
 
-                            VisualizeEntity(player, baseLock.WorldSpaceBounds().position, $"{baseLock.ShortPrefabName}\n{action}");
+                            VisualizeHouseEntity(player, baseLock.WorldSpaceBounds().position, $"{baseLock.ShortPrefabName}\n{action}");
                         }
                     }
                 }
@@ -387,12 +460,16 @@ namespace Oxide.Plugins
             }
 
             if (onComplete != null)
-                onComplete.Invoke(count);
+            {
+                onComplete.Invoke(successCount, failCount);
+            }
         }
 
-        private IEnumerator ClearAuthCodeLocks(BasePlayer player, Building building, Action<int> onComplete)
+        private IEnumerator ClearCodeLockAuthsCoroutine(BasePlayer player, Building building, Action<int, int> onComplete)
         {
-            int count = 0;
+            int successCount = 0;
+            int failCount = 0;
+
             foreach (var decayEntity in building.decayEntities)
             {
                 if (decayEntity is BaseEntity baseEntity)
@@ -400,13 +477,19 @@ namespace Oxide.Plugins
                     CodeLock codeLock = baseEntity.GetSlot(BaseEntity.Slot.Lock) as CodeLock;
                     if (codeLock != null)
                     {
+                        if (_config.PlayerHasToBeOwnerOfHouseEntities && !OwnerOrTeammate(player, codeLock))
+                        {
+                            failCount++;
+                            continue;
+                        }
+
                         codeLock.whitelistPlayers.Clear();
                         codeLock.guestPlayers.Clear();
-                        count++;
+                        successCount++;
 
                         if (_config.EnableVisualization)
                         {
-                            VisualizeEntity(player, codeLock.WorldSpaceBounds().position, $"{codeLock.ShortPrefabName}\nAuthorization Cleared");
+                            VisualizeHouseEntity(player, codeLock.WorldSpaceBounds().position, $"{codeLock.ShortPrefabName}\nAuthorization Cleared");
                         }
                     }
                 }
@@ -415,12 +498,16 @@ namespace Oxide.Plugins
             }
 
             if (onComplete != null)
-                onComplete.Invoke(count);
+            {
+                onComplete.Invoke(successCount, failCount);
+            }
         }
 
-        private IEnumerator ChangeCodeLocks(BasePlayer player, Building building, string newCode, Action<int> onComplete)
+        private IEnumerator ChangeCodeForCodeLocksCoroutine(BasePlayer player, Building building, string newCode, Action<int, int> onComplete)
         {
-            int count = 0;
+            int successCount = 0;
+            int failCount = 0;
+
             foreach (var decayEntity in building.decayEntities)
             {
                 if (decayEntity is BaseEntity baseEntity)
@@ -428,13 +515,19 @@ namespace Oxide.Plugins
                     CodeLock codeLock = baseEntity.GetSlot(BaseEntity.Slot.Lock) as CodeLock;
                     if (codeLock != null)
                     {
+                        if (_config.PlayerHasToBeOwnerOfHouseEntities && !OwnerOrTeammate(player, codeLock))
+                        {
+                            failCount++;
+                            continue;
+                        }
+
                         codeLock.code = newCode;
                         codeLock.SetFlag(BaseEntity.Flags.Locked, true);
-                        count++;
+                        successCount++;
 
                         if (_config.EnableVisualization)
                         {
-                            VisualizeEntity(player, codeLock.WorldSpaceBounds().position, $"{codeLock.ShortPrefabName}\nCode Changed {newCode}");
+                            VisualizeHouseEntity(player, codeLock.WorldSpaceBounds().position, $"{codeLock.ShortPrefabName}\nCode Changed {newCode}");
                         }
                     }
                 }
@@ -443,29 +536,39 @@ namespace Oxide.Plugins
             }
 
             if (onComplete != null)
-                onComplete.Invoke(count);
+            {
+                onComplete.Invoke(successCount, failCount);
+            }
         }
 
         #endregion Locks
 
         #region Traps
 
-        private IEnumerator TurnOffOrOnAutoTurrets(BasePlayer player, Building building, bool turnOn, Action<int> onComplete)
+        private IEnumerator TurnAutoTurretsOffOrOnCoroutine(BasePlayer player, Building building, bool turnOn, Action<int, int> onComplete)
         {
-            int count = 0;
+            int successCount = 0;
+            int failCount = 0;
+
             foreach (var decayEntity in building.decayEntities)
             {
                 if (decayEntity is AutoTurret autoTurret)
                 {
+                    if (_config.PlayerHasToBeOwnerOfHouseEntities && !OwnerOrTeammate(player, autoTurret))
+                    {
+                        failCount++;
+                        continue;
+                    }
+
                     if (turnOn && autoTurret.IsPowered())
                     {
                         autoTurret.InitiateStartup();
-                        count++;
+                        successCount++;
                     }
                     else if (!turnOn && autoTurret.IsOnline())
                     {
                         autoTurret.InitiateShutdown();
-                        count++;
+                        successCount++;
                     }
 
                     if (_config.EnableVisualization)
@@ -476,33 +579,45 @@ namespace Oxide.Plugins
                             action = "Turned On";
                         }
 
-                        VisualizeEntity(player, autoTurret.WorldSpaceBounds().position, $"{autoTurret.ShortPrefabName}\n{action}");
+                        VisualizeHouseEntity(player, autoTurret.WorldSpaceBounds().position, $"{autoTurret.ShortPrefabName}\n{action}");
                     }
                 }
                 yield return null;
             }
 
             if (onComplete != null)
-                onComplete.Invoke(count);
+            {
+                onComplete.Invoke(successCount, failCount);
+            }
         }
-
-        private IEnumerator UnloadAutoTurrets(BasePlayer player, Building building, Action<int> onComplete)
+        
+        private IEnumerator UnloadAutoTurretsCoroutine(BasePlayer player, Building building, Action<int, int> onComplete)
         {
-            int count = 0;
+            int successCount = 0;
+            int failCount = 0;
+
             foreach (var decayEntity in building.decayEntities)
             {
                 if (decayEntity is AutoTurret autoTurret)
-                {             
+                {
+                    if (_config.PlayerHasToBeOwnerOfHouseEntities && !OwnerOrTeammate(player, autoTurret))
+                    {
+                        failCount++;
+                        continue;
+                    }
+
                     if (UnloadTrapFromAmmo(autoTurret.inventory, dropAmmo: true))
                     {
-                        count++;
+                        successCount++;
                         if (_config.EnableVisualization)
                         {
-                            VisualizeEntity(player, autoTurret.WorldSpaceBounds().position, $"{autoTurret.ShortPrefabName}\nUnloaded");
+                            VisualizeHouseEntity(player, autoTurret.WorldSpaceBounds().position, $"{autoTurret.ShortPrefabName}\nUnloaded");
                         }
 
                         if (autoTurret.IsOnline())
+                        {
                             autoTurret.InitiateShutdown();
+                        }
                     }
                 }
 
@@ -510,25 +625,35 @@ namespace Oxide.Plugins
             }
 
             if (onComplete != null)
-                onComplete.Invoke(count);
+            {
+                onComplete.Invoke(successCount, failCount);
+            }
         }
 
-        private IEnumerator UnloadTraps(BasePlayer player, Building building, Action<int> onComplete)
+        private IEnumerator UnloadTrapsCoroutine(BasePlayer player, Building building, Action<int, int> onComplete)
         {
-            int count = 0;
+            int successCount = 0;
+            int failCount = 0;
+
             foreach (var decayEntity in building.decayEntities)
             {
                 if (decayEntity is GunTrap || decayEntity is FlameTurret)
                 {
+                    if (_config.PlayerHasToBeOwnerOfHouseEntities && !OwnerOrTeammate(player, decayEntity))
+                    {
+                        failCount++;
+                        continue;
+                    }
+
                     StorageContainer storageContainer = decayEntity as StorageContainer;
                     if (storageContainer != null)
                     {
                         if (UnloadTrapFromAmmo(storageContainer.inventory, dropAmmo: true))
                         {
-                            count++;
+                            successCount++;
                             if (_config.EnableVisualization)
                             {
-                                VisualizeEntity(player, decayEntity.WorldSpaceBounds().position, $"{decayEntity.ShortPrefabName}\nUnloaded");
+                                VisualizeHouseEntity(player, decayEntity.WorldSpaceBounds().position, $"{decayEntity.ShortPrefabName}\nUnloaded");
                             }
                         }
                     }
@@ -538,22 +663,32 @@ namespace Oxide.Plugins
             }
 
             if (onComplete != null)
-                onComplete.Invoke(count);
+            {
+                onComplete.Invoke(successCount, failCount);
+            }
         }
 
-        private IEnumerator ClearAuthAutoTurrets(BasePlayer player, Building building, Action<int> onComplete)
+        private IEnumerator ClearAutoTurretAuthsCoroutine(BasePlayer player, Building building, Action<int, int> onComplete)
         {
-            int count = 0;
+            int successCount = 0;
+            int failCount = 0;
+
             foreach (var decayEntity in building.decayEntities)
             {
                 if (decayEntity is AutoTurret autoTurret)
                 {
+                    if (_config.PlayerHasToBeOwnerOfHouseEntities && !OwnerOrTeammate(player, autoTurret))
+                    {
+                        failCount++;
+                        continue;
+                    }
+
                     autoTurret.authorizedPlayers.Clear();
-                    count++;
+                    successCount++;
 
                     if (_config.EnableVisualization)
                     {
-                        VisualizeEntity(player, autoTurret.WorldSpaceBounds().position, $"{autoTurret.ShortPrefabName}\nAuthorization Cleared");
+                        VisualizeHouseEntity(player, autoTurret.WorldSpaceBounds().position, $"{autoTurret.ShortPrefabName}\nAuthorization Cleared");
                     }
                 }
 
@@ -561,18 +696,28 @@ namespace Oxide.Plugins
             }
 
             if (onComplete != null)
-                onComplete.Invoke(count);
+            {
+                onComplete.Invoke(successCount, failCount);
+            }
         }
-
-        private IEnumerator SetAutoTurretMode(BasePlayer player, Building building, bool peacekeeper, Action<int> onComplete)
+        
+        private IEnumerator SetAutoTurretsAsPeacekeeperOrHostileCoroutine(BasePlayer player, Building building, bool peacekeeper, Action<int, int> onComplete)
         {
-            int count = 0;
+            int successCount = 0;
+            int failCount = 0;
+
             foreach (var decayEntity in building.decayEntities)
             {
                 if (decayEntity is AutoTurret autoTurret)
                 {
+                    if (_config.PlayerHasToBeOwnerOfHouseEntities && !OwnerOrTeammate(player, autoTurret))
+                    {
+                        failCount++;
+                        continue;
+                    }
+
                     autoTurret.SetPeacekeepermode(peacekeeper);
-                    count++;
+                    successCount++;
 
                     if (_config.EnableVisualization)
                     {
@@ -582,7 +727,7 @@ namespace Oxide.Plugins
                             mode = "Peacekeeper";
                         }
 
-                        VisualizeEntity(player, autoTurret.WorldSpaceBounds().position, $"{autoTurret.ShortPrefabName}\n{mode}");
+                        VisualizeHouseEntity(player, autoTurret.WorldSpaceBounds().position, $"{autoTurret.ShortPrefabName}\n{mode}");
                     }
                 }
 
@@ -590,13 +735,17 @@ namespace Oxide.Plugins
             }
 
             if (onComplete != null)
-                onComplete.Invoke(count);
+            {
+                onComplete.Invoke(successCount, failCount);
+            }
         }
-
+        
         private bool UnloadTrapFromAmmo(ItemContainer ammoContainer, bool dropAmmo)
         {
             if (ammoContainer == null)
+            {
                 return false;
+            }
 
             bool unloaded = false;
             List<Item> itemsToUnload = Pool.GetList<Item>();
@@ -604,15 +753,21 @@ namespace Oxide.Plugins
             foreach (Item item in ammoContainer.itemList)
             {
                 if (item != null && item.amount > 0)
+                {
                     itemsToUnload.Add(item);
+                }
             }
 
             foreach (Item item in itemsToUnload)
             {
                 if (dropAmmo)
+                {
                     item.Drop(ammoContainer.dropPosition, ammoContainer.dropVelocity, default(Quaternion));
+                }
                 else
+                {
                     item.Remove();
+                }
 
                 unloaded = true;
             }
@@ -625,19 +780,27 @@ namespace Oxide.Plugins
 
         #region Tool Cupboards
 
-        private IEnumerator ClearAuthCupboards(BasePlayer player, Building building, Action<int> onComplete)
+        private IEnumerator ClearCupboardAuthsCoroutine(BasePlayer player, Building building, Action<int, int> onComplete)
         {
-            int count = 0;
+            int successCount = 0;
+            int failCount = 0;
+
             foreach (var decayEntity in building.decayEntities)
             {
                 if (decayEntity is BuildingPrivlidge cupboard)
                 {
+                    if (_config.PlayerHasToBeOwnerOfHouseEntities && !OwnerOrTeammate(player, cupboard))
+                    {
+                        failCount++;
+                        continue;
+                    }
+
                     cupboard.authorizedPlayers.Clear();
-                    count++;
+                    successCount++;
 
                     if (_config.EnableVisualization)
                     {
-                        VisualizeEntity(player, cupboard.WorldSpaceBounds().position, $"{cupboard.ShortPrefabName}\nAuthorization Cleared");
+                        VisualizeHouseEntity(player, cupboard.WorldSpaceBounds().position, $"{cupboard.ShortPrefabName}\nAuthorization Cleared");
                     }
                 }
 
@@ -645,12 +808,14 @@ namespace Oxide.Plugins
             }
 
             if (onComplete != null)
-                onComplete.Invoke(count);
+            {
+                onComplete.Invoke(successCount, failCount);
+            }
         }
 
         #endregion Tool Cupboards
 
-        #endregion House Management
+        #endregion House Entities Management
 
         #region Commands
 
@@ -713,14 +878,14 @@ namespace Oxide.Plugins
 
             bool open = args[0] == "open";
 
-            BuildingBlock buildingBlock = FindBuildingBlockInSight(player, _config.BuildingDetectionRange);
-            if (buildingBlock == null)
+            BaseEntity entity = GetEntityInSight(player, _config.BuildingDetectionRange);
+            if (entity == null)
             {
-                SendMessage(player, Lang.NoBuildingFound);
+                SendMessage(player, Lang.NoEntityFound);
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            Building building = TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
@@ -739,21 +904,28 @@ namespace Oxide.Plugins
                 return;
             }
 
-            CoroutineUtil.StartCoroutine("OpenOrCloseDoors", OpenOrCloseDoors(player, building, open, count =>
+            SendMessage(player, Lang.ScanningBuilding);
+
+            CoroutineUtil.StartCoroutine("OpenOrCloseDoors", OpenOrCloseDoorsCoroutine(player, building, open, (successCount, failCount) =>
             {
                 if (open)
                 {
-                    if (count > 0)
-                        SendMessage(player, Lang.DoorsOpened, count);
+                    if (successCount > 0)
+                        SendMessage(player, Lang.DoorsOpened, successCount);
                     else
                         SendMessage(player, Lang.NoDoorsToOpen);
                 }
                 else
                 {
-                    if (count > 0)
-                        SendMessage(player, Lang.DoorsClosed, count);
+                    if (successCount > 0)
+                        SendMessage(player, Lang.DoorsClosed, successCount);
                     else
                         SendMessage(player, Lang.NoDoorsToClose);
+                }
+
+                if (failCount > 0)
+                {
+                    SendMessage(player, Lang.NoOwnership, failCount);
                 }
             }));
         }
@@ -780,14 +952,14 @@ namespace Oxide.Plugins
                 return;
             }
 
-            BuildingBlock buildingBlock = FindBuildingBlockInSight(player, _config.BuildingDetectionRange);
-            if (buildingBlock == null)
+            BaseEntity entity = GetEntityInSight(player, _config.BuildingDetectionRange);
+            if (entity == null)
             {
-                SendMessage(player, Lang.NoBuildingFound);
+                SendMessage(player, Lang.NoEntityFound);
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            Building building = TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
@@ -802,58 +974,82 @@ namespace Oxide.Plugins
 
             if (args[0] == "unlock")
             {
-                CoroutineUtil.StartCoroutine("LockOrUnlockCodeLocks", LockOrUnlockCodeLocks(player, building, false, count =>
+                SendMessage(player, Lang.ScanningBuilding);
+                CoroutineUtil.StartCoroutine("LockOrUnlockLocks", LockOrUnlockLocksCoroutine(player, building, false, (successCount, failCount) =>
                 {
-                    if (count > 0)
+                    if (successCount > 0)
                     {
-                        SendMessage(player, Lang.LocksUnlocked, count);
+                        SendMessage(player, Lang.LocksUnlocked, successCount);
                     }
                     else
                     {
                         SendMessage(player, Lang.NoLocksToUnlock);
                     }
+
+                    if (failCount > 0)
+                    {
+                        SendMessage(player, Lang.NoOwnership, failCount);
+                    }
                 }));
             }
             else if (args[0] == "lock")
             {
-                CoroutineUtil.StartCoroutine("LockOrUnlockCodeLocks", LockOrUnlockCodeLocks(player, building, true, count =>
+                SendMessage(player, Lang.ScanningBuilding);
+                CoroutineUtil.StartCoroutine("LockOrUnlockLocks", LockOrUnlockLocksCoroutine(player, building, true, (successCount, failCount) =>
                 {
-                    if (count > 0)
+                    if (successCount > 0)
                     {
-                        SendMessage(player, Lang.LocksLocked, count);
+                        SendMessage(player, Lang.LocksLocked, successCount);
                     }
                     else
                     {
                         SendMessage(player, Lang.NoLocksToLock);
                     }
+
+                    if (failCount > 0)
+                    {
+                        SendMessage(player, Lang.NoOwnership, failCount);
+                    }
                 }));
             }
             else if (args[0] == "auth" && args.Length == 2 && args[1] == "clear")
             {
-                CoroutineUtil.StartCoroutine("ClearAuthCodeLocks", ClearAuthCodeLocks(player, building, count =>
+                SendMessage(player, Lang.ScanningBuilding);
+                CoroutineUtil.StartCoroutine("ClearCodeLockAuths", ClearCodeLockAuthsCoroutine(player, building, (successCount, failCount) =>
                 {
-                    if (count > 0)
+                    if (successCount > 0)
                     {
-                        SendMessage(player, Lang.AuthCleared, count);
+                        SendMessage(player, Lang.AuthCleared, successCount);
                     }
                     else
                     {
                         SendMessage(player, Lang.NoAuthToClear);
+                    }
+
+                    if (failCount > 0)
+                    {
+                        SendMessage(player, Lang.NoOwnership, failCount);
                     }
                 }));
             }
             else if (args[0] == "code" && args.Length == 2)
             {
                 string newCode = args[1];
-                CoroutineUtil.StartCoroutine("ChangeCodeLocks", ChangeCodeLocks(player, building, newCode, count =>
+                SendMessage(player, Lang.ScanningBuilding);
+                CoroutineUtil.StartCoroutine("ChangeCodeForCodeLocks", ChangeCodeForCodeLocksCoroutine(player, building, newCode, (successCount, failCount) =>
                 {
-                    if (count > 0)
+                    if (successCount > 0)
                     {
-                        SendMessage(player, Lang.CodeChanged, count, newCode);
+                        SendMessage(player, Lang.CodeChanged, successCount, newCode);
                     }
                     else
                     {
                         SendMessage(player, Lang.NoCodesToChange);
+                    }
+
+                    if (failCount > 0)
+                    {
+                        SendMessage(player, Lang.NoOwnership, failCount);
                     }
                 }));
             }
@@ -891,14 +1087,14 @@ namespace Oxide.Plugins
                 return;
             }
 
-            BuildingBlock buildingBlock = FindBuildingBlockInSight(player, _config.BuildingDetectionRange);
-            if (buildingBlock == null)
+            BaseEntity entity = GetEntityInSight(player, _config.BuildingDetectionRange);
+            if (entity == null)
             {
-                SendMessage(player, Lang.NoBuildingFound);
+                SendMessage(player, Lang.NoEntityFound);
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            Building building = TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
@@ -914,64 +1110,94 @@ namespace Oxide.Plugins
             if (args[0] == "on" || args[0] == "off")
             {
                 bool turnOn = args[0] == "on";
-                CoroutineUtil.StartCoroutine("TurnOffOrOnAutoTurrets", TurnOffOrOnAutoTurrets(player, building, turnOn, count =>
+                SendMessage(player, Lang.ScanningBuilding);
+                CoroutineUtil.StartCoroutine("TurnAutoTurretsOffOrOn", TurnAutoTurretsOffOrOnCoroutine(player, building, turnOn, (successCount, failCount) =>
                 {
                     if (turnOn)
                     {
-                        if (count > 0)
-                            SendMessage(player, Lang.TurretsOn, count);
+                        if (successCount > 0)
+                            SendMessage(player, Lang.TurretsOn, successCount);
                         else
                             SendMessage(player, Lang.NoTurretsToTurnOn);
                     }
                     else
                     {
-                        if (count > 0)
-                            SendMessage(player, Lang.TurretsOff, count);
+                        if (successCount > 0)
+                            SendMessage(player, Lang.TurretsOff, successCount);
                         else
                             SendMessage(player, Lang.NoTurretsToTurnOff);
+                    }
+
+                    if (failCount > 0)
+                    {
+                        SendMessage(player, Lang.NoOwnership, failCount);
                     }
                 }));
             }
             else if (args[0] == "unload")
             {
-                CoroutineUtil.StartCoroutine("UnloadAutoTurrets", UnloadAutoTurrets(player, building, count =>
+                SendMessage(player, Lang.ScanningBuilding);
+                CoroutineUtil.StartCoroutine("UnloadAutoTurrets", UnloadAutoTurretsCoroutine(player, building, (successCount, failCount) =>
                 {
-                    if (count > 0)
+                    if (successCount > 0)
                     {
-                        SendMessage(player, Lang.TurretsUnloaded, count);
+                        SendMessage(player, Lang.TurretsUnloaded, successCount);
                     }
                     else
                     {
                         SendMessage(player, Lang.NoTurretsToUnload);
                     }
+
+                    if (failCount > 0)
+                    {
+                        SendMessage(player, Lang.NoOwnership, failCount);
+                    }
                 }));
             }
             else if (args[0] == "auth" && args.Length == 2 && args[1] == "clear")
             {
-                CoroutineUtil.StartCoroutine("ClearAuthAutoTurrets", ClearAuthAutoTurrets(player, building, count =>
+                SendMessage(player, Lang.ScanningBuilding);
+                CoroutineUtil.StartCoroutine("ClearAutoTurretAuths", ClearAutoTurretAuthsCoroutine(player, building, (successCount, failCount) =>
                 {
-                    if (count > 0)
+                    if (successCount > 0)
                     {
-                        SendMessage(player, Lang.TurretAuthCleared, count);
+                        SendMessage(player, Lang.TurretAuthCleared, successCount);
                     }
                     else
                     {
                         SendMessage(player, Lang.NoTurretAuthToClear);
                     }
+
+                    if (failCount > 0)
+                    {
+                        SendMessage(player, Lang.NoOwnership, failCount);
+                    }
                 }));
             }
             else if (args[0] == "peacekeeper")
             {
-                CoroutineUtil.StartCoroutine("SetAutoTurretMode", SetAutoTurretMode(player, building, true, count =>
+                SendMessage(player, Lang.ScanningBuilding);
+                CoroutineUtil.StartCoroutine("SetAutoTurretsAsPeacekeeperOrHostile", SetAutoTurretsAsPeacekeeperOrHostileCoroutine(player, building, true, (successCount, failCount) =>
                 {
-                    SendMessage(player, Lang.TurretsPeacekeeper, count);
+                    SendMessage(player, Lang.TurretsPeacekeeper, successCount);
+
+                    if (failCount > 0)
+                    {
+                        SendMessage(player, Lang.NoOwnership, failCount);
+                    }
                 }));
             }
             else if (args[0] == "hostile")
             {
-                CoroutineUtil.StartCoroutine("SetAutoTurretMode", SetAutoTurretMode(player, building, false, count =>
+                SendMessage(player, Lang.ScanningBuilding);
+                CoroutineUtil.StartCoroutine("SetAutoTurretsAsPeacekeeperOrHostile", SetAutoTurretsAsPeacekeeperOrHostileCoroutine(player, building, false, (successCount, failCount) =>
                 {
-                    SendMessage(player, Lang.TurretsHostile, count);
+                    SendMessage(player, Lang.TurretsHostile, successCount);
+
+                    if (failCount > 0)
+                    {
+                        SendMessage(player, Lang.NoOwnership, failCount);
+                    }
                 }));
             }
             else
@@ -1005,14 +1231,14 @@ namespace Oxide.Plugins
                 return;
             }
 
-            BuildingBlock buildingBlock = FindBuildingBlockInSight(player, _config.BuildingDetectionRange);
-            if (buildingBlock == null)
+            BaseEntity entity = GetEntityInSight(player, _config.BuildingDetectionRange);
+            if (entity == null)
             {
-                SendMessage(player, Lang.NoBuildingFound);
+                SendMessage(player, Lang.NoEntityFound);
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            Building building = TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
@@ -1025,15 +1251,21 @@ namespace Oxide.Plugins
                 return;
             }
 
-            CoroutineUtil.StartCoroutine("ClearAuthCupboards", ClearAuthCupboards(player, building, count =>
+            SendMessage(player, Lang.ScanningBuilding);
+            CoroutineUtil.StartCoroutine("ClearCupboardAuths", ClearCupboardAuthsCoroutine(player, building, (successCount, failCount) =>
             {
-                if (count > 0)
+                if (successCount > 0)
                 {
-                    SendMessage(player, Lang.CupboardAuthCleared, count);
+                    SendMessage(player, Lang.CupboardAuthCleared, successCount);
                 }
                 else
                 {
                     SendMessage(player, Lang.NoCupboardAuthToClear);
+                }
+
+                if (failCount > 0)
+                {
+                    SendMessage(player, Lang.NoOwnership, failCount);
                 }
             }));
         }
@@ -1057,14 +1289,14 @@ namespace Oxide.Plugins
                 return;
             }
 
-            BuildingBlock buildingBlock = FindBuildingBlockInSight(player, _config.BuildingDetectionRange);
-            if (buildingBlock == null)
+            BaseEntity entity = GetEntityInSight(player, _config.BuildingDetectionRange);
+            if (entity == null)
             {
-                SendMessage(player, Lang.NoBuildingFound);
+                SendMessage(player, Lang.NoEntityFound);
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(buildingBlock, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            Building building = TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
@@ -1077,15 +1309,21 @@ namespace Oxide.Plugins
                 return;
             }
 
-            CoroutineUtil.StartCoroutine("UnloadTraps", UnloadTraps(player, building, count =>
+            SendMessage(player, Lang.ScanningBuilding);
+            CoroutineUtil.StartCoroutine("UnloadTraps", UnloadTrapsCoroutine(player, building, (successCount, failCount) =>
             {
-                if (count > 0)
+                if (successCount > 0)
                 {
-                    SendMessage(player, Lang.TrapsUnloaded, count);
+                    SendMessage(player, Lang.TrapsUnloaded, successCount);
                 }
                 else
                 {
                     SendMessage(player, Lang.NoTrapsToUnload);
+                }
+
+                if (failCount > 0)
+                {
+                    SendMessage(player, Lang.NoOwnership, failCount);
                 }
             }));
         }
@@ -1098,8 +1336,11 @@ namespace Oxide.Plugins
         {
             public const string NoPermission = "NoPermission";
             public const string InvalidArgs = "InvalidArgs";
+            public const string NoEntityFound = "NoEntityFound";
             public const string NoBuildingFound = "NoBuildingFound";
             public const string NoAuthorization = "NoAuthorization";
+            public const string NoOwnership = "NoOwnership";
+            public const string ScanningBuilding = "ScanningBuilding";
             public const string DoorsOpened = "DoorsOpened";
             public const string DoorsClosed = "DoorsClosed";
             public const string NoDoorsToOpen = "NoDoorsToOpen";
@@ -1134,8 +1375,11 @@ namespace Oxide.Plugins
             {
                 [Lang.NoPermission] = "You do not have permission to use this command.",
                 [Lang.InvalidArgs] = "Invalid arguments. Usage:\n{0}",
-                [Lang.NoBuildingFound] = "No building found in sight or the building does not have a tool cupboard.",
+                [Lang.NoEntityFound] = "No entity found in sight.",
+                [Lang.NoBuildingFound] = "No building found or the building does not have a tool cupboard.",
                 [Lang.NoAuthorization] = "Building privilege is required to perform this action.",
+                [Lang.NoOwnership] = "Could not manage <color=#ADFF2F>{0}</color> entities because you are neither the owner nor a member of the owner's team.",
+                [Lang.ScanningBuilding] = "Scanning the building. This may take a few seconds, please wait a moment...",
                 [Lang.DoorsOpened] = "<color=#ADFF2F>{0}</color> doors have been opened.",
                 [Lang.DoorsClosed] = "<color=#ADFF2F>{0}</color> doors have been closed.",
                 [Lang.NoDoorsToOpen] = "No doors to open.",
