@@ -16,7 +16,7 @@ using static BuildingManager;
 
 namespace Oxide.Plugins
 {
-    [Info("House Keys", "VisEntities", "1.2.0")]
+    [Info("House Keys", "VisEntities", "1.2.1")]
     [Description("Enables remote control of doors, locks, and turrets in any building.")]
     public class HouseKeys : RustPlugin
     {
@@ -137,54 +137,6 @@ namespace Oxide.Plugins
 
         #endregion Oxide Hooks
 
-        #region Building Retrieval
-
-        private BaseEntity GetEntityInSight(BasePlayer player, float distance)
-        {
-            RaycastHit raycastHit;
-            if (Physics.Raycast(player.eyes.HeadRay(), out raycastHit, distance, LAYER_BUILDING, QueryTriggerInteraction.Ignore))
-            {
-                BaseEntity entity = raycastHit.GetEntity();
-                if (entity != null)
-                {
-                    if (_config.EnableVisualization)
-                        VisualizeDetectedEntityInSight(player, player.eyes.position, raycastHit.point, entity.ShortPrefabName);
-
-                    return entity;
-                }
-            }
-
-            return null;
-        }
-
-        private Building TryGetBuildingForEntity(BaseEntity entity, int minimumBuildingBlocks, bool mustHaveBuildingPrivilege = true)
-        {
-            BuildingBlock buildingBlock = entity as BuildingBlock;
-            DecayEntity decayEntity = entity as DecayEntity;
-
-            uint buildingId = 0;
-            if (buildingBlock != null)
-            {
-                buildingId = buildingBlock.buildingID;
-            }
-            else if (decayEntity != null)
-            {
-                buildingId = decayEntity.buildingID;
-            }
-
-            Building building = server.GetBuilding(buildingId);
-            if (building != null &&
-                building.buildingBlocks.Count >= minimumBuildingBlocks &&
-                (!mustHaveBuildingPrivilege || building.HasBuildingPrivileges()))
-            {
-                return building;
-            }
-
-            return null;
-        }
-
-        #endregion Building Retrieval
-
         #region Permissions
 
         private static class PermissionUtil
@@ -224,6 +176,35 @@ namespace Oxide.Plugins
         #endregion Permissions
 
         #region Helper Classes
+
+        private static class BuildingUtil
+        {
+            public static Building TryGetBuildingForEntity(BaseEntity entity, int minimumBuildingBlocks, bool mustHaveBuildingPrivilege = true)
+            {
+                BuildingBlock buildingBlock = entity as BuildingBlock;
+                DecayEntity decayEntity = entity as DecayEntity;
+
+                uint buildingId = 0;
+                if (buildingBlock != null)
+                {
+                    buildingId = buildingBlock.buildingID;
+                }
+                else if (decayEntity != null)
+                {
+                    buildingId = decayEntity.buildingID;
+                }
+
+                Building building = server.GetBuilding(buildingId);
+                if (building != null &&
+                    building.buildingBlocks.Count >= minimumBuildingBlocks &&
+                    (!mustHaveBuildingPrivilege || building.HasBuildingPrivileges()))
+                {
+                    return building;
+                }
+
+                return null;
+            }
+        }
 
         public static class DrawUtil
         {
@@ -289,6 +270,24 @@ namespace Oxide.Plugins
 
         #region Helper Functions
 
+        private BaseEntity GetEntityInSight(BasePlayer player, float distance)
+        {
+            RaycastHit raycastHit;
+            if (Physics.Raycast(player.eyes.HeadRay(), out raycastHit, distance, LAYER_BUILDING, QueryTriggerInteraction.Ignore))
+            {
+                BaseEntity entity = raycastHit.GetEntity();
+                if (entity != null)
+                {
+                    if (_config.EnableVisualization)
+                        VisualizeDetectedEntityInSight(player, player.eyes.position, raycastHit.point, entity.ShortPrefabName);
+
+                    return entity;
+                }
+            }
+
+            return null;
+        }
+
         public static bool OwnerOrTeammate(BasePlayer player, BaseEntity entity)
         {
             if (entity.OwnerID == player.userID)
@@ -309,7 +308,7 @@ namespace Oxide.Plugins
             return false;
         }
 
-        public static bool PlayerHasBuildingPrivilege(BasePlayer player, Building building)
+        public static bool AuthedInBuilding(BasePlayer player, Building building)
         {
             foreach (var privilege in building.buildingPrivileges)
             {
@@ -748,7 +747,7 @@ namespace Oxide.Plugins
             }
 
             bool unloaded = false;
-            List<Item> itemsToUnload = Pool.GetList<Item>();
+            List<Item> itemsToUnload = Pool.Get<List<Item>>();
 
             foreach (Item item in ammoContainer.itemList)
             {
@@ -772,7 +771,7 @@ namespace Oxide.Plugins
                 unloaded = true;
             }
 
-            Pool.FreeList(ref itemsToUnload);
+            Pool.FreeUnmanaged(ref itemsToUnload);
             return unloaded;
         }
 
@@ -885,20 +884,20 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
                 return;
             }
 
-            if (_config.PlayerHasToHaveBuildingPrivilege && !PlayerHasBuildingPrivilege(player, building))
+            if (_config.PlayerHasToHaveBuildingPrivilege && !AuthedInBuilding(player, building))
             {
                 SendMessage(player, Lang.NoAuthorization);
                 return;
             }
 
-            if (_config.PlayerHasToHaveBuildingPrivilege && !PlayerHasBuildingPrivilege(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
+            if (_config.PlayerHasToHaveBuildingPrivilege && !AuthedInBuilding(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
             {
                 SendMessage(player, Lang.NoAuthorization);
                 return;
@@ -959,14 +958,14 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
                 return;
             }
 
-            if (_config.PlayerHasToHaveBuildingPrivilege && !PlayerHasBuildingPrivilege(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
+            if (_config.PlayerHasToHaveBuildingPrivilege && !AuthedInBuilding(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
             {
                 SendMessage(player, Lang.NoAuthorization);
                 return;
@@ -1094,14 +1093,14 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
                 return;
             }
 
-            if (_config.PlayerHasToHaveBuildingPrivilege && !PlayerHasBuildingPrivilege(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
+            if (_config.PlayerHasToHaveBuildingPrivilege && !AuthedInBuilding(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
             {
                 SendMessage(player, Lang.NoAuthorization);
                 return;
@@ -1238,14 +1237,14 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
                 return;
             }
 
-            if (_config.PlayerHasToHaveBuildingPrivilege && !PlayerHasBuildingPrivilege(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
+            if (_config.PlayerHasToHaveBuildingPrivilege && !AuthedInBuilding(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
             {
                 SendMessage(player, Lang.NoAuthorization);
                 return;
@@ -1296,14 +1295,14 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
                 return;
             }
 
-            if (_config.PlayerHasToHaveBuildingPrivilege && !PlayerHasBuildingPrivilege(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
+            if (_config.PlayerHasToHaveBuildingPrivilege && !AuthedInBuilding(player, building) && !PermissionUtil.HasPermission(player, PermissionUtil.BYPASS))
             {
                 SendMessage(player, Lang.NoAuthorization);
                 return;
