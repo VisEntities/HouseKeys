@@ -12,11 +12,10 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
-using static BuildingManager;
 
 namespace Oxide.Plugins
 {
-    [Info("House Keys", "VisEntities", "1.2.1")]
+    [Info("House Keys", "VisEntities", "1.2.2")]
     [Description("Enables remote control of doors, locks, and turrets in any building.")]
     public class HouseKeys : RustPlugin
     {
@@ -179,7 +178,7 @@ namespace Oxide.Plugins
 
         private static class BuildingUtil
         {
-            public static Building TryGetBuildingForEntity(BaseEntity entity, int minimumBuildingBlocks, bool mustHaveBuildingPrivilege = true)
+            public static BuildingManager.Building TryGetBuildingForEntity(BaseEntity entity, int minimumBuildingBlocks, bool mustHaveBuildingPrivilege = true)
             {
                 BuildingBlock buildingBlock = entity as BuildingBlock;
                 DecayEntity decayEntity = entity as DecayEntity;
@@ -194,7 +193,7 @@ namespace Oxide.Plugins
                     buildingId = decayEntity.buildingID;
                 }
 
-                Building building = server.GetBuilding(buildingId);
+                BuildingManager.Building building = BuildingManager.server.GetBuilding(buildingId);
                 if (building != null &&
                     building.buildingBlocks.Count >= minimumBuildingBlocks &&
                     (!mustHaveBuildingPrivilege || building.HasBuildingPrivileges()))
@@ -308,7 +307,7 @@ namespace Oxide.Plugins
             return false;
         }
 
-        public static bool AuthedInBuilding(BasePlayer player, Building building)
+        public static bool AuthedInBuilding(BasePlayer player, BuildingManager.Building building)
         {
             foreach (var privilege in building.buildingPrivileges)
             {
@@ -378,7 +377,7 @@ namespace Oxide.Plugins
 
         #region Doors
 
-        private IEnumerator OpenOrCloseDoorsCoroutine(BasePlayer player, Building building, bool open, Action<int, int> onComplete)
+        private IEnumerator OpenOrCloseDoorsCoroutine(BasePlayer player, BuildingManager.Building building, bool open, Action<int, int> onComplete)
         {
             int successCount = 0;
             int failCount = 0;
@@ -421,7 +420,7 @@ namespace Oxide.Plugins
 
         #region Locks
 
-        private IEnumerator LockOrUnlockLocksCoroutine(BasePlayer player, Building building, bool locked, Action<int, int> onComplete)
+        private IEnumerator LockOrUnlockLocksCoroutine(BasePlayer player, BuildingManager.Building building, bool locked, Action<int, int> onComplete)
         {
             int successCount = 0;
             int failCount = 0;
@@ -464,7 +463,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private IEnumerator ClearCodeLockAuthsCoroutine(BasePlayer player, Building building, Action<int, int> onComplete)
+        private IEnumerator ClearCodeLockAuthsCoroutine(BasePlayer player, BuildingManager.Building building, Action<int, int> onComplete)
         {
             int successCount = 0;
             int failCount = 0;
@@ -502,7 +501,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private IEnumerator ChangeCodeForCodeLocksCoroutine(BasePlayer player, Building building, string newCode, Action<int, int> onComplete)
+        private IEnumerator ChangeCodeForCodeLocksCoroutine(BasePlayer player, BuildingManager.Building building, string newCode, Action<int, int> onComplete)
         {
             int successCount = 0;
             int failCount = 0;
@@ -544,7 +543,7 @@ namespace Oxide.Plugins
 
         #region Traps
 
-        private IEnumerator TurnAutoTurretsOffOrOnCoroutine(BasePlayer player, Building building, bool turnOn, Action<int, int> onComplete)
+        private IEnumerator TurnAutoTurretsOffOrOnCoroutine(BasePlayer player, BuildingManager.Building building, bool turnOn, Action<int, int> onComplete)
         {
             int successCount = 0;
             int failCount = 0;
@@ -590,7 +589,7 @@ namespace Oxide.Plugins
             }
         }
         
-        private IEnumerator UnloadAutoTurretsCoroutine(BasePlayer player, Building building, Action<int, int> onComplete)
+        private IEnumerator UnloadAutoTurretsCoroutine(BasePlayer player, BuildingManager.Building building, Action<int, int> onComplete)
         {
             int successCount = 0;
             int failCount = 0;
@@ -629,7 +628,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private IEnumerator UnloadTrapsCoroutine(BasePlayer player, Building building, Action<int, int> onComplete)
+        private IEnumerator UnloadTrapsCoroutine(BasePlayer player, BuildingManager.Building building, Action<int, int> onComplete)
         {
             int successCount = 0;
             int failCount = 0;
@@ -667,7 +666,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private IEnumerator ClearAutoTurretAuthsCoroutine(BasePlayer player, Building building, Action<int, int> onComplete)
+        private IEnumerator ClearAutoTurretAuthsCoroutine(BasePlayer player, BuildingManager.Building building, Action<int, int> onComplete)
         {
             int successCount = 0;
             int failCount = 0;
@@ -700,7 +699,7 @@ namespace Oxide.Plugins
             }
         }
         
-        private IEnumerator SetAutoTurretsAsPeacekeeperOrHostileCoroutine(BasePlayer player, Building building, bool peacekeeper, Action<int, int> onComplete)
+        private IEnumerator SetAutoTurretsAsPeacekeeperOrHostileCoroutine(BasePlayer player, BuildingManager.Building building, bool peacekeeper, Action<int, int> onComplete)
         {
             int successCount = 0;
             int failCount = 0;
@@ -779,7 +778,7 @@ namespace Oxide.Plugins
 
         #region Tool Cupboards
 
-        private IEnumerator ClearCupboardAuthsCoroutine(BasePlayer player, Building building, Action<int, int> onComplete)
+        private IEnumerator ClearCupboardAuthsCoroutine(BasePlayer player, BuildingManager.Building building, Action<int, int> onComplete)
         {
             int successCount = 0;
             int failCount = 0;
@@ -884,7 +883,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            BuildingManager.Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
@@ -958,7 +957,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            BuildingManager.Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
@@ -1093,7 +1092,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            BuildingManager.Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
@@ -1237,7 +1236,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            BuildingManager.Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
@@ -1295,7 +1294,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
+            BuildingManager.Building building = BuildingUtil.TryGetBuildingForEntity(entity, minimumBuildingBlocks: 1, _config.BuildingHasToHaveToolCupboard);
             if (building == null)
             {
                 SendMessage(player, Lang.NoBuildingFound);
